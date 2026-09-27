@@ -124,6 +124,74 @@ def test_opens_dispute_window_when_sources_disagree(contract, direct_vm, direct_
     assert contract.get_latest_price(ASSET) == ""
 
 
+def test_finalizes_at_exact_deviation_boundary(contract, direct_vm, direct_alice):
+    # spread_bps == deviation_bps must finalize (the decision uses "<=", not "<"), and this value
+    # must come from the same canonical figure that's stored -- not a separately recomputed one.
+    direct_vm.sender = direct_alice
+    register_default_feed(contract, direct_vm, deviation_bps=100)  # exactly 1.00% threshold
+    warp_to(direct_vm, NOW)
+
+    # median 200, spread (201-199)/200*10000 = exactly 100 bps -- equal to the threshold.
+    mock_price_sources(
+        direct_vm,
+        "price 199",
+        "price 201",
+        '{"prices": [199, 201]}',
+    )
+    contract.request_update(ASSET)
+
+    round_data = contract.get_round(ASSET, 1)
+    assert round_data["spread_bps"] == 100
+    assert round_data["status"] == "finalized"
+
+
+def test_price_is_canonicalized_to_six_decimals(contract, direct_vm, direct_alice):
+    # The median can land on a long repeating decimal (e.g. an odd split across sources).
+    # The stored price must be the rounded, canonical figure the equivalence check agreed on --
+    # not a raw, differently-formatted float that would break exact cross-validator matching.
+    direct_vm.sender = direct_alice
+    register_default_feed(contract, direct_vm, deviation_bps=50)
+    warp_to(direct_vm, NOW)
+
+    mock_price_sources(
+        direct_vm,
+        "price 10",
+        "price 10.0000005",
+        '{"prices": [10, 10.0000005]}',
+    )
+    contract.request_update(ASSET)
+
+    round_data = contract.get_round(ASSET, 1)
+    assert round_data["price"] == str(round((10 + 10.0000005) / 2, 6))
+
+
+def test_ignores_non_numeric_extraction_from_fetched_source(contract, direct_vm, direct_alice):
+    # A source can be fetched successfully but still yield no usable number (garbage/ambiguous
+    # page text). That source must be excluded from the price decision entirely, not treated as
+    # a usable reading of 0 or as a reason to abort when enough *other* sources are usable.
+    direct_vm.sender = direct_alice
+    contract.register_feed(
+        ASSET, [SOURCE_A, SOURCE_B, "https://example.com/source-c"], PARSE_HINT, 50, SHORT_WINDOW
+    )
+    warp_to(direct_vm, NOW)
+
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(r"https://example\.com/source-a", {"status": 200, "body": "price 3000"})
+    direct_vm.mock_web(r"https://example\.com/source-b", {"status": 200, "body": "price 3005"})
+    direct_vm.mock_web(r"https://example\.com/source-c", {"status": 200, "body": "no clear number here"})
+    direct_vm.mock_llm(
+        r".*extracting the current numeric spot price.*",
+        '{"prices": [3000, 3005, "UNAVAILABLE"]}',
+    )
+    contract.request_update(ASSET)
+
+    round_data = contract.get_round(ASSET, 1)
+    assert round_data["status"] == "finalized"
+    assert round_data["sources"][2]["usable"] is False
+    assert round_data["sources"][0]["usable"] is True
+    assert round_data["sources"][1]["usable"] is True
+
+
 def test_fewer_than_two_usable_sources_aborts(contract, direct_vm, direct_alice):
     direct_vm.sender = direct_alice
     register_default_feed(contract, direct_vm)
