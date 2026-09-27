@@ -149,6 +149,29 @@ was actually different. Real bugs found and fixed:
    `gl.message_raw["datetime"]` so the contract's own clock reads move
    too) — copied over as the `warp_to()` helper.
 
+## Self-review, pass 3: fixed after steward rejection (non-deterministic finalize/dispute outcome)
+
+The steward rejected the submission because the round's decision logic (median price, spread_bps,
+and the finalized/pending_dispute status) was computed by plain code *after* `eq_principle
+.prompt_comparative` returned, from numbers that were only checked for ~1% agreement across
+validators. That meant a different, equally "close enough" leader could legitimately have produced
+a different exact price and a different finalize-vs-dispute outcome for the same real-world
+inputs -- whichever validator happened to lead that call effectively decided the round's fate, not
+the underlying market data.
+
+Fixed by moving the median/spread/status derivation *inside* `leader()`, so it's part of what the
+Equivalence Principle itself checks, and by rewriting the principle so per-source raw numbers keep
+their ~1% audit-only slack while the four values that actually drive state (whether enough sources
+were usable, the canonical rounded price, the spread, and the status) must match exactly across
+validators. A round now only reaches consensus at all when validator-compatible runs agree on the
+same final price and the same lifecycle outcome; runs that would have diverged on either one
+correctly fail to reach consensus instead of silently picking one.
+
+Three tests were added to lock this in: an exact-boundary case (`spread_bps == deviation_bps` must
+finalize), a canonicalization case (the stored price is the rounded figure the check agreed on, not
+a raw unrounded float), and a case where a fetched-but-unparseable source is excluded from the
+price decision rather than aborting the round or being treated as a zero reading.
+
 ## Open items still worth a final check before submitting
 
 - The pinned `py-genlayer:...` dependency hash was taken from a contract
