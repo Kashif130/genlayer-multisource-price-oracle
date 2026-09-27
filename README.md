@@ -2,11 +2,14 @@
 
 A reusable multi-source price/data oracle primitive for GenLayer. Validators
 independently fetch several web sources for the same asset, extract a
-numeric price from each, and must agree with each other via the Equivalence
-Principle before a round is accepted at all. Whether that agreed reading is
-trusted immediately or has to sit through a dispute window is then decided
-by plain, auditable code — not by asking the model whether the sources
-"look consistent enough."
+numeric price from each, and reach consensus via the Equivalence Principle
+on both the reading itself and on the decision it drives — whether that
+reading is trusted immediately or has to sit through a dispute window.
+That decision (spread vs. threshold) is plain, auditable arithmetic, not a
+model judgment call, but it's derived *inside* the same equivalence-checked
+step, so every validator-compatible run of `request_update()` is guaranteed
+to land on the same final price and the same finalize/dispute outcome —
+see "Why the decision lives inside the equivalence check" below.
 
 ## Reviewer summary
 
@@ -14,10 +17,12 @@ by plain, auditable code — not by asking the model whether the sources
   dispute window.
 - `request_update()` has every validator fetch all sources, extract a
   price from each via `gl.nondet.exec_prompt(..., response_format="json")`,
-  and agree with each other via `gl.eq_principle.prompt_comparative`.
-- The spread across sources is then computed in plain Python. Within
-  tolerance → finalizes immediately. Beyond tolerance → opens a dispute
-  window instead of trusting it outright.
+  and reach consensus via `gl.eq_principle.prompt_comparative`.
+- That consensus step itself computes the spread across sources in plain
+  Python and decides the round's status: within tolerance → finalizes
+  immediately; beyond tolerance → opens a dispute window instead of
+  trusting it outright. See "Why the decision lives inside the
+  equivalence check" for why this isn't done after consensus.
 - Anyone can challenge a pending round with evidence
   (`open_dispute`/`resolve_dispute`), or let it auto-finalize once the
   window passes unchallenged (`finalize_if_expired`).
@@ -89,6 +94,32 @@ gated; the oracle's actual output — requesting an update, disputing it,
 resolving a dispute — is permissionless for every feed, so no single party
 ever has a lever over whether a price round is trusted.
 
+## Why the decision lives inside the equivalence check
+
+Per-source price extraction is allowed the usual small (~1%) slack between
+validators — real web text and LLM extraction naturally jitter that much,
+and it's harmless if it stays confined to the audit-trail readings. What
+must **not** be allowed to drift between validators is the round's actual
+fate: the exact price it publishes, and whether it finalizes or opens a
+dispute window. An earlier draft computed those two things in plain code
+*after* the equivalence check returned — using numbers that had only been
+checked for ~1% agreement. That meant a different, equally "close enough"
+validator could have led the same call and legitimately produced a
+different published price and a different finalize/dispute outcome for
+identical real-world input: which validator happened to lead was silently
+deciding the round's fate, not the market data.
+
+The fix moves the median/spread/status derivation inside the same closure
+the Equivalence Principle checks, and requires validators to match
+**exactly** on the four values that drive state — enough-sources, the
+canonical (rounded) price, the spread, and the status — while still
+allowing the usual slack on the raw per-source numbers those are derived
+from. A round now only reaches consensus at all when validator-compatible
+runs would have produced the same final price and the same lifecycle
+outcome; a run that would have diverged on either one correctly fails to
+reach consensus instead of silently picking one. See DECISION.md's
+"Self-review, pass 3" entry for the full account.
+
 ## Running this project
 
 ```bash
@@ -146,4 +177,4 @@ a standalone Intelligent Contract, not a full product with a frontend.
   of this contract should add that hardening.
 
 See `DECISION.md` for the full design rationale, rejected alternatives,
-and a record of the bugs found across two self-review passes.
+and a record of the bugs found across three self-review/review passes.
